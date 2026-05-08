@@ -41,6 +41,7 @@ import {
   type CodecResponseEncoding,
   createResponseCompressor,
 } from "./codec-compression";
+import { tokenizeContent } from "./codec-content";
 
 /**
  * Decode a Codec-framed POST body into a JSON-RPC message and replace
@@ -94,6 +95,15 @@ export function wrapResponseForCodec(
   res: Response,
   format: CodecStreamFormat,
   encoding: CodecResponseEncoding,
+  /**
+   * sha256 hash of the negotiated vocab map. When provided, every
+   * JSON-RPC response we observe gets walked for `CallToolResult`
+   * payloads — text content blocks pick up a sibling `_codec_meta`
+   * block with the tokenized form. Without a vocab the wire still
+   * gets reframed as msgpack, just without the per-content
+   * tokenization layered on top.
+   */
+  vocabHash?: string,
 ): () => void {
   // Set Codec headers up front so the SDK's later setHeader calls for
   // Content-Type get overridden cleanly. We keep its other headers
@@ -217,7 +227,7 @@ export function wrapResponseForCodec(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (res as any).write = (chunk: any, ...rest: any[]): boolean => {
     try {
-      forwardChunkToCodec(chunk, compressor, format);
+      forwardChunkToCodec(chunk, compressor, format, vocabHash);
       // Honor the optional callback on the original signature
       const cb = rest.find((arg) => typeof arg === "function") as
         | ((err?: Error) => void)
@@ -234,7 +244,7 @@ export function wrapResponseForCodec(
   (res as any).end = ((chunk?: any, ...rest: any[]): Response => {
     if (chunk) {
       try {
-        forwardChunkToCodec(chunk, compressor, format);
+        forwardChunkToCodec(chunk, compressor, format, vocabHash);
       } catch (err) {
         compressor.destroy(err instanceof Error ? err : new Error(String(err)));
         return originalEnd();
@@ -258,18 +268,52 @@ export function wrapResponseForCodec(
  *
  * The SDK has two emission modes; we don't try to detect which one
  * we're in — we just look for parsable JSON segments in the chunk.
+ *
+ * When a vocab map hash is provided, every CallToolResult-shaped
+ * message gets its text content blocks tokenized + paired with a
+ * `_codec_meta` sibling before encoding. Other JSON-RPC messages
+ * (initialize, prompts/get, resources/read, errors, ...) pass
+ * through structurally unchanged — the wire reduction comes from
+ * msgpack-encoding the envelope, not from rewriting their bodies.
  */
 function forwardChunkToCodec(
   chunk: unknown,
   out: NodeJS.WritableStream,
   format: CodecStreamFormat,
+  vocabHash: string | undefined,
 ): void {
   const text = chunkToString(chunk);
   if (text.length === 0) return;
 
   for (const message of extractJsonRpcMessages(text)) {
-    out.write(encodeCodecFrame(message, format));
+    const transformed = vocabHash ? tokenizeIfCallToolResult(message, vocabHash) : message;
+    out.write(encodeCodecFrame(transformed, format));
   }
+}
+
+/** Identify a CallToolResult-shaped JSON-RPC response and rewrite
+ *  its content[]. Anything else passes through untouched. */
+function tokenizeIfCallToolResult(
+  message: JsonRpcMessage,
+  vocabHash: string,
+): JsonRpcMessage {
+  const result = (message as { result?: unknown }).result;
+  if (!result || typeof result !== "object") return message;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return message;
+
+  // tokenizeContent's signature wants a CallToolResult; we know
+  // enough about the shape (content: array) to satisfy the type.
+  // Cast and let it pass — the function itself is defensive about
+  // non-text blocks.
+  const rewritten = tokenizeContent(
+    result as Parameters<typeof tokenizeContent>[0],
+    vocabHash,
+  );
+  return {
+    ...message,
+    result: rewritten,
+  };
 }
 
 function chunkToString(chunk: unknown): string {
