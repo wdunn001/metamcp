@@ -112,12 +112,20 @@ function bumpShim(kind: "detok" | "tok", vocabHash: string): void {
 // Once-per-vocab "shim mode engaged" log line. Operators see one
 // entry per fresh (vocab, process-lifetime) pair so logs aren't
 // flooded but the path is grep-able.
+//
+// Emitted at WARN level because shim mode IS the degraded path per
+// the spec — leaf-tokenizing tools would skip this hop entirely.
+// Logger's default LOG_LEVEL is `errors-only`, which mirrors WARN
+// and ERROR to console; INFO would be invisible by default and that
+// would defeat the spec's "MUST be observable to operators" rule.
+// Once-per-(vocab, process) limits volume; the per-call counter in
+// `shimMetrics` is the high-rate observability source.
 const shimAnnouncedFor = new Set<string>();
 function announceShimOnce(vocabHash: string, kind: "detok" | "tok"): void {
   const key = `${vocabHash}:${kind}`;
   if (shimAnnouncedFor.has(key)) return;
   shimAnnouncedFor.add(key);
-  logger.info(
+  logger.warn(
     `[Codec][shim] ${kind === "detok" ? "detokenizing args" : "tokenizing tool result"} ` +
       `for vocab ${vocabHash.slice(0, 12)}… — leaf-mode MCP server would skip this. ` +
       `(spec/PROTOCOL.md § Backward compatibility)`,
