@@ -42,7 +42,16 @@ interface CachedVocab {
   mapId: string;
   map: TokenizerMap;
   detok: Detokenizer;
-  tok: Tokenizer;
+  /** Optional — Tokenizer construction can fail on maps whose
+   *  `pre_tokenizer_pattern` uses regex syntax this Node's V8
+   *  doesn't accept (e.g. `(?i:...)` inline-flag groups under
+   *  `'gu'` flag — fixed in V8 12.4 with `'gv'` but @codecai/web
+   *  0.3.0 still constructs with `'gu'`). When undefined,
+   *  response-side text-content tokenization is a no-op for this
+   *  map; the wire still gets reframed as msgpack. Request-side
+   *  args detokenization (which uses Detokenizer, not Tokenizer)
+   *  still works either way. */
+  tok: Tokenizer | undefined;
   /** Last-accessed timestamp for LRU eviction. */
   touchedAt: number;
 }
@@ -81,11 +90,27 @@ export async function resolveVocabMap(
     throw err;
   }
 
+  // Detokenizer always works — it's a pure ID -> bytes lookup, no
+  // regex involved. Tokenizer construction can fail (see comment on
+  // CachedVocab.tok); catch + degrade gracefully so the
+  // detokenize-only path stays usable.
+  let tok: Tokenizer | undefined;
+  try {
+    tok = pickTokenizer(map);
+  } catch (err) {
+    logger.warn(
+      `[Codec] Tokenizer construction failed for map ${map.id} (${hash.slice(0, 14)}...) — ` +
+        `response-side text tokenization will be a no-op for this map. ` +
+        `Detokenize / args path still works. Cause: ${(err as Error).message}`,
+    );
+    tok = undefined;
+  }
+
   const entry: CachedVocab = {
     mapId: map.id,
     map,
     detok: new Detokenizer(map),
-    tok: pickTokenizer(map),
+    tok,
     touchedAt: Date.now(),
   };
   cache.set(hash, entry);

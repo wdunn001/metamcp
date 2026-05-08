@@ -180,6 +180,13 @@ export function tokenizeContent(
     );
     return result;
   }
+  if (!vocab.tok) {
+    // Map cached but Tokenizer construction failed (see codec-
+    // vocab.ts CachedVocab.tok comment). Fall through and ship
+    // text content unchanged — the wire is still re-framed as
+    // msgpack/gzip by the wrapper above.
+    return result;
+  }
 
   const newContent = result.content.map((block) => {
     if (block.type !== "text" || typeof block.text !== "string") {
