@@ -123,13 +123,22 @@ export function wrapResponseForCodec(
   });
   compressor.pipe(res);
 
-  // Patch the SDK's view of res. The SDK calls write() with either:
-  //   - A serialized JSON-RPC message ending in "\n" (single-shot mode), or
-  //   - An SSE chunk like `event: message\ndata: {...}\n\n` (stream mode).
+  // Patch the SDK's view of res. The SDK uses three call patterns:
   //
-  // Both paths produce JSON-RPC messages that we can encode as Codec
-  // frames. We parse the chunk back to JS, frame it, and pipe to the
-  // compressor.
+  //   1. `res.writeHead(status, headers).flushHeaders()` — commits
+  //      headers immediately for streaming responses (SSE). This
+  //      OVERWRITES anything we set via setHeader earlier, so we
+  //      have to intercept writeHead and substitute our Codec headers
+  //      back in.
+  //
+  //   2. `res.write(chunk)` — newline-delimited JSON or SSE event
+  //      chunks. Parsed back to JS, framed, and piped to the
+  //      compressor.
+  //
+  //   3. `res.writeHead(status).end(JSON.stringify(...))` — short
+  //      error path for protocol failures (4xx/406/415/etc.). The
+  //      end() chunk goes through the same forwarder so the client
+  //      gets a Codec-encoded error envelope rather than mixed JSON.
   const originalWrite = res.write.bind(res);
   const originalEnd = res.end.bind(res);
 
@@ -137,6 +146,61 @@ export function wrapResponseForCodec(
   // originalWrite because that would write the original JSON bytes
   // alongside our Codec frames.
   void originalWrite;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const originalWriteHead = (res as any).writeHead.bind(res);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (res as any).writeHead = (
+    status: number,
+    headersOrReason?: unknown,
+    maybeHeaders?: unknown,
+  ) => {
+    // Pin our Codec headers regardless of what the SDK tries to
+    // set. Lets the SDK pick the status code (200 for happy path,
+    // 4xx for protocol errors) but the wire bytes underneath stay
+    // Codec for the duration of this request.
+    const ourHeaders: Record<string, string> = {
+      "Content-Type": contentTypeFor(format),
+      "Transfer-Encoding": "chunked",
+    };
+    if (encoding !== "identity") {
+      ourHeaders["Content-Encoding"] = encoding;
+      ourHeaders["Vary"] = "Accept-Encoding";
+    }
+    // Carry forward any non-conflicting headers the SDK passed —
+    // mcp-session-id, cache-control, access-control-*, etc. The
+    // shape of writeHead is overloaded:
+    //   writeHead(status, headers)
+    //   writeHead(status, statusMessage, headers)
+    let sdkHeaders: Record<string, string> | undefined;
+    if (headersOrReason && typeof headersOrReason === "object") {
+      sdkHeaders = headersOrReason as Record<string, string>;
+    } else if (maybeHeaders && typeof maybeHeaders === "object") {
+      sdkHeaders = maybeHeaders as Record<string, string>;
+    }
+    if (sdkHeaders) {
+      for (const [key, value] of Object.entries(sdkHeaders)) {
+        const lower = key.toLowerCase();
+        if (
+          lower === "content-type" ||
+          lower === "content-encoding" ||
+          lower === "content-length" ||
+          lower === "transfer-encoding"
+        ) {
+          continue; // we own these
+        }
+        ourHeaders[key] = String(value);
+      }
+    }
+    return originalWriteHead(status, ourHeaders);
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (res as any).flushHeaders = () => {
+    // No-op: writeHead already commits. The SDK calls flushHeaders
+    // after writeHead for SSE; if we forward it the underlying
+    // socket sends headers twice. Swallow it.
+  };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (res as any).write = (chunk: any, ...rest: any[]): boolean => {
