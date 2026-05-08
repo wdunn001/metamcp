@@ -11,10 +11,35 @@ import { lookupEndpoint } from "@/middleware/lookup-endpoint-middleware";
 import { rateLimitMiddleware } from "@/middleware/rate-limit.middleware";
 import logger from "@/utils/logger";
 
+import { negotiateResponseEncoding } from "../../lib/metamcp/codec/codec-compression";
+import {
+  extractCodecArgsMeta,
+  loadVocabFromHeader,
+} from "../../lib/metamcp/codec/codec-content";
+import { negotiateStreamFormat } from "../../lib/metamcp/codec/codec-frame";
+import {
+  decodeCodecRequestBody,
+  wrapResponseForCodec,
+} from "../../lib/metamcp/codec/codec-transcode";
+import { lookupVocabMap } from "../../lib/metamcp/codec/codec-vocab";
 import { metaMcpServerPool } from "../../lib/metamcp/metamcp-server-pool";
 import { SessionLifetimeManagerImpl } from "../../lib/session-lifetime-manager";
 
 const streamableHttpRouter = express.Router();
+
+// Codec opt-in raw-body parser. Only kicks in when the client posts
+// `application/x-codec-msgpack` or `…-protobuf`. JSON-RPC traffic on
+// the same routes is parsed by the SDK's existing JSON middleware
+// and is byte-for-byte unchanged.
+streamableHttpRouter.use(
+  express.raw({
+    type: [
+      "application/x-codec-msgpack",
+      "application/x-codec-protobuf",
+    ],
+    limit: "4mb",
+  }),
+);
 
 // Session lifetime manager for StreamableHTTP sessions
 const sessionManager =
@@ -116,6 +141,136 @@ streamableHttpRouter.post(
     const authReq = req as ApiKeyAuthenticatedRequest;
     const { namespaceUuid, endpointName } = authReq;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // ── Codec negotiation ───────────────────────────────────────────
+    // Request and response negotiation are INDEPENDENT:
+    //   - Content-Type: application/x-codec-msgpack on the request
+    //     means decode the inbound body as msgpack before handing
+    //     to the SDK. Always pairs with the matching response format.
+    //   - ?stream_format=… or Accept: application/x-codec-… means
+    //     wrap the response so the SDK's JSON-RPC writes emit Codec
+    //     frames. The inbound body can still be plain JSON — the
+    //     client may want JSON-in / Codec-out for migration paths.
+    // Pinning these two together (as the first version did) breaks
+    // the JSON-in / Codec-out path: a JSON body fails msgpack-decode
+    // before the SDK even sees it.
+    const reqContentType = req.headers["content-type"] as string | undefined;
+    const reqCodecFormat: ReturnType<typeof negotiateStreamFormat> =
+      reqContentType?.includes("application/x-codec-msgpack")
+        ? "msgpack"
+        : reqContentType?.includes("application/x-codec-protobuf")
+          ? "protobuf"
+          : undefined;
+    if (reqCodecFormat) {
+      try {
+        decodeCodecRequestBody(req, reqCodecFormat);
+      } catch (error) {
+        logger.error(
+          `Codec request decode failed (${reqCodecFormat}):`,
+          error,
+        );
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32700,
+            message: `Codec request body could not be decoded as ${reqCodecFormat}`,
+          },
+        });
+        return;
+      }
+    }
+
+    // ── Vocab map negotiation ───────────────────────────────────────
+    // Optional X-Codec-Map: <url>;sha256=<hash> header. If present,
+    // load + cache the map so detokenize/tokenize transforms can run
+    // synchronously downstream. Per-request: the same client can
+    // switch vocabs by changing the header.
+    let vocabHash: string | undefined;
+    const codecMapHeader = req.headers["x-codec-map"] as string | undefined;
+    if (codecMapHeader) {
+      try {
+        const loaded = await loadVocabFromHeader(codecMapHeader);
+        vocabHash = loaded?.hash;
+      } catch (error) {
+        logger.error(`X-Codec-Map header rejected:`, error);
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message: `Invalid X-Codec-Map header: ${(error as Error).message}`,
+          },
+        });
+        return;
+      }
+    }
+
+    // ── Detokenize tools/call args carried as Codec ────────────────
+    // If the request body is a tools/call whose `arguments` is a
+    // Codec-encoded block, replace it with the detokenized JSON
+    // object before the SDK ever sees it. The MCP server downstream
+    // gets the same JSON it would have gotten without Codec — the
+    // tokenizer/detokenizer pair is purely a wire-side optimization.
+    const body = req.body as
+      | { method?: string; params?: { arguments?: unknown } }
+      | undefined;
+    if (body?.method === "tools/call") {
+      const meta = extractCodecArgsMeta(body.params?.arguments);
+      if (meta) {
+        const vocab = lookupVocabMap(meta.map_id);
+        if (!vocab) {
+          res.status(400).json({
+            jsonrpc: "2.0",
+            id: null,
+            error: {
+              code: -32600,
+              message:
+                `tools/call args reference vocab map ${meta.map_id} but it isn't cached. ` +
+                `Send X-Codec-Map: <url>;sha256=${meta.map_id} alongside this request.`,
+            },
+          });
+          return;
+        }
+        const text = vocab.detok.render(meta.ids, { partial: false });
+        try {
+          (body.params as { arguments: unknown }).arguments = JSON.parse(text);
+        } catch (error) {
+          res.status(400).json({
+            jsonrpc: "2.0",
+            id: null,
+            error: {
+              code: -32700,
+              message: `Codec args detokenized to non-JSON text: ${(error as Error).message}`,
+            },
+          });
+          return;
+        }
+      }
+    }
+
+    const respCodecFormat = negotiateStreamFormat(
+      req.query as Record<string, unknown>,
+      req.headers.accept as string | undefined,
+    );
+    if (respCodecFormat) {
+      const acceptEncoding = req.headers["accept-encoding"] as
+        | string
+        | undefined;
+      const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+      // Pass the vocab hash so wrapResponseForCodec runs the
+      // CallToolResult content tokenizer on every response in this
+      // request's lifecycle. Without a vocab, the wire still gets
+      // reframed as msgpack but text content stays as-is.
+      wrapResponseForCodec(res, respCodecFormat, codecEncoding, vocabHash);
+      // The SDK's StreamableHTTPServerTransport runs its own Accept
+      // negotiation against `application/json` + `text/event-stream`
+      // and returns 406 for anything else. Spoof the header so the
+      // SDK accepts the request — the wrapResponseForCodec layer
+      // above will re-frame whatever bytes the SDK writes back into
+      // the Codec wire format on the way out.
+      req.headers.accept = "application/json, text/event-stream";
+    }
 
     // Log authentication information for debugging
     logger.info(`POST /mcp request for endpoint: ${endpointName}`);

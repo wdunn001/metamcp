@@ -8,10 +8,38 @@ import express from "express";
 import logger from "@/utils/logger";
 
 import { createServer } from "../../lib/metamcp/index";
+import {
+  decodeCodecRequestBody,
+  wrapResponseForCodec,
+} from "../../lib/metamcp/codec/codec-transcode";
+import { negotiateStreamFormat } from "../../lib/metamcp/codec/codec-frame";
+import { negotiateResponseEncoding } from "../../lib/metamcp/codec/codec-compression";
+import {
+  extractCodecArgsMeta,
+  loadVocabFromHeader,
+} from "../../lib/metamcp/codec/codec-content";
+import { lookupVocabMap } from "../../lib/metamcp/codec/codec-vocab";
 import { mcpServerPool } from "../../lib/metamcp/mcp-server-pool";
 import { betterAuthMcpMiddleware } from "../../middleware/better-auth-mcp.middleware";
 
 const metamcpRouter = express.Router();
+
+// Codec opt-in raw-body parser. Only kicks in when the client posts
+// `application/x-codec-msgpack` or `…-protobuf`. JSON-RPC traffic on
+// the same route is parsed by the SDK's existing JSON middleware and
+// is byte-for-byte unchanged.
+const codecRawBodyParser = express.raw({
+  type: [
+    "application/x-codec-msgpack",
+    "application/x-codec-protobuf",
+  ],
+  // 4 MB matches the SDK's default JSON body limit; tool-call inputs
+  // larger than this are unusual and would have failed on the JSON
+  // path too.
+  limit: "4mb",
+});
+
+metamcpRouter.use(codecRawBodyParser);
 
 // Apply better auth middleware to all metamcp routes
 metamcpRouter.use(betterAuthMcpMiddleware);
@@ -92,6 +120,109 @@ metamcpRouter.post("/:uuid/mcp", async (req, res) => {
         cleanup: () => Promise<void>;
       }
     | undefined;
+
+  // ── Codec negotiation ─────────────────────────────────────────────
+  // Request and response negotiation are INDEPENDENT — see the
+  // matching block in routers/public-metamcp/streamable-http.ts for
+  // the rationale. Request decode keys off Content-Type; response
+  // wrap keys off ?stream_format / Accept.
+  const reqContentType = req.headers["content-type"] as string | undefined;
+  const reqCodecFormat: ReturnType<typeof negotiateStreamFormat> =
+    reqContentType?.includes("application/x-codec-msgpack")
+      ? "msgpack"
+      : reqContentType?.includes("application/x-codec-protobuf")
+        ? "protobuf"
+        : undefined;
+  if (reqCodecFormat) {
+    try {
+      decodeCodecRequestBody(req, reqCodecFormat);
+    } catch (error) {
+      logger.error(`Codec request decode failed (${reqCodecFormat}):`, error);
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32700,
+          message: `Codec request body could not be decoded as ${reqCodecFormat}`,
+        },
+      });
+      return;
+    }
+  }
+
+  // Vocab map (optional, per-request via X-Codec-Map header). When
+  // present, enables CallToolResult content tokenization and
+  // tools/call args detokenization at this seam.
+  let vocabHash: string | undefined;
+  const codecMapHeader = req.headers["x-codec-map"] as string | undefined;
+  if (codecMapHeader) {
+    try {
+      const loaded = await loadVocabFromHeader(codecMapHeader);
+      vocabHash = loaded?.hash;
+    } catch (error) {
+      logger.error(`X-Codec-Map header rejected:`, error);
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32600,
+          message: `Invalid X-Codec-Map header: ${(error as Error).message}`,
+        },
+      });
+      return;
+    }
+  }
+
+  // Detokenize Codec tools/call args inline before the SDK sees them.
+  const adminBody = req.body as
+    | { method?: string; params?: { arguments?: unknown } }
+    | undefined;
+  if (adminBody?.method === "tools/call") {
+    const meta = extractCodecArgsMeta(adminBody.params?.arguments);
+    if (meta) {
+      const vocab = lookupVocabMap(meta.map_id);
+      if (!vocab) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message:
+              `tools/call args reference vocab map ${meta.map_id} but it isn't cached. ` +
+              `Send X-Codec-Map alongside this request.`,
+          },
+        });
+        return;
+      }
+      const text = vocab.detok.render(meta.ids, { partial: false });
+      try {
+        (adminBody.params as { arguments: unknown }).arguments = JSON.parse(text);
+      } catch (error) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32700,
+            message: `Codec args detokenized to non-JSON text: ${(error as Error).message}`,
+          },
+        });
+        return;
+      }
+    }
+  }
+
+  const respCodecFormat = negotiateStreamFormat(
+    req.query as Record<string, unknown>,
+    req.headers.accept as string | undefined,
+  );
+  if (respCodecFormat) {
+    const acceptEncoding = req.headers["accept-encoding"] as string | undefined;
+    const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+    wrapResponseForCodec(res, respCodecFormat, codecEncoding, vocabHash);
+    // SDK rejects unknown Accept values with 406 — spoof JSON+SSE so
+    // it proceeds; we re-frame the bytes on the way out.
+    req.headers.accept = "application/json, text/event-stream";
+  }
 
   if (!sessionId) {
     try {
