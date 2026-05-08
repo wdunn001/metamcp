@@ -22,7 +22,7 @@
     "db:migrate:dev": "dotenv -e ../../.env.local -- drizzle-kit migrate"
   },
   "dependencies": {
-    "@codecai/web": "^0.3.0",
+    "@codecai/web": "^0.4.0",
     "@modelcontextprotocol/sdk": "1.16.0",
     "@msgpack/msgpack": "^3.0.0",
     "@repo/trpc": "workspace:*",
