@@ -164,6 +164,13 @@ streamableHttpRouter.post(
     if (reqCodecFormat) {
       try {
         decodeCodecRequestBody(req, reqCodecFormat);
+        // Spoof Content-Type so the SDK's StreamableHTTPServerTransport
+        // (which validates against application/json) accepts the request
+        // we just decoded. The body is now a parsed JS object — the SDK
+        // sees what it would have seen if the client had posted JSON.
+        // Same pattern as the Accept-header spoof below for the response
+        // direction.
+        req.headers["content-type"] = "application/json";
       } catch (error) {
         logger.error(
           `Codec request decode failed (${reqCodecFormat}):`,
