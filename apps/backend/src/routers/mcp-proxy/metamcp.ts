@@ -8,10 +8,33 @@ import express from "express";
 import logger from "@/utils/logger";
 
 import { createServer } from "../../lib/metamcp/index";
+import {
+  decodeCodecRequestBody,
+  wrapResponseForCodec,
+} from "../../lib/metamcp/codec/codec-transcode";
+import { negotiateStreamFormat } from "../../lib/metamcp/codec/codec-frame";
+import { negotiateResponseEncoding } from "../../lib/metamcp/codec/codec-compression";
 import { mcpServerPool } from "../../lib/metamcp/mcp-server-pool";
 import { betterAuthMcpMiddleware } from "../../middleware/better-auth-mcp.middleware";
 
 const metamcpRouter = express.Router();
+
+// Codec opt-in raw-body parser. Only kicks in when the client posts
+// `application/x-codec-msgpack` or `…-protobuf`. JSON-RPC traffic on
+// the same route is parsed by the SDK's existing JSON middleware and
+// is byte-for-byte unchanged.
+const codecRawBodyParser = express.raw({
+  type: [
+    "application/x-codec-msgpack",
+    "application/x-codec-protobuf",
+  ],
+  // 4 MB matches the SDK's default JSON body limit; tool-call inputs
+  // larger than this are unusual and would have failed on the JSON
+  // path too.
+  limit: "4mb",
+});
+
+metamcpRouter.use(codecRawBodyParser);
 
 // Apply better auth middleware to all metamcp routes
 metamcpRouter.use(betterAuthMcpMiddleware);
@@ -92,6 +115,35 @@ metamcpRouter.post("/:uuid/mcp", async (req, res) => {
         cleanup: () => Promise<void>;
       }
     | undefined;
+
+  // ── Codec negotiation ─────────────────────────────────────────────
+  // Pick the wire format from `?stream_format=…` or `Accept: application/x-codec-…`.
+  // When set, transcode the request body from msgpack/protobuf to a
+  // JS object up front and wrap `res` so the SDK's JSON-RPC writes
+  // turn into Codec frames on the wire. JSON traffic is untouched.
+  const codecFormat = negotiateStreamFormat(
+    req.query as Record<string, unknown>,
+    req.headers.accept as string | undefined,
+  );
+  if (codecFormat) {
+    try {
+      decodeCodecRequestBody(req, codecFormat);
+    } catch (error) {
+      logger.error(`Codec request decode failed (${codecFormat}):`, error);
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32700,
+          message: `Codec request body could not be decoded as ${codecFormat}`,
+        },
+      });
+      return;
+    }
+    const acceptEncoding = req.headers["accept-encoding"] as string | undefined;
+    const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+    wrapResponseForCodec(res, codecFormat, codecEncoding);
+  }
 
   if (!sessionId) {
     try {
