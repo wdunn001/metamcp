@@ -138,20 +138,30 @@ streamableHttpRouter.post(
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     // ── Codec negotiation ───────────────────────────────────────────
-    // Pick the wire format from `?stream_format=…` or `Accept:
-    // application/x-codec-…`. When set, transcode the request body
-    // up front and wrap `res` so the SDK's JSON-RPC writes turn
-    // into Codec frames on the wire. JSON traffic is untouched.
-    const codecFormat = negotiateStreamFormat(
-      req.query as Record<string, unknown>,
-      req.headers.accept as string | undefined,
-    );
-    if (codecFormat) {
+    // Request and response negotiation are INDEPENDENT:
+    //   - Content-Type: application/x-codec-msgpack on the request
+    //     means decode the inbound body as msgpack before handing
+    //     to the SDK. Always pairs with the matching response format.
+    //   - ?stream_format=… or Accept: application/x-codec-… means
+    //     wrap the response so the SDK's JSON-RPC writes emit Codec
+    //     frames. The inbound body can still be plain JSON — the
+    //     client may want JSON-in / Codec-out for migration paths.
+    // Pinning these two together (as the first version did) breaks
+    // the JSON-in / Codec-out path: a JSON body fails msgpack-decode
+    // before the SDK even sees it.
+    const reqContentType = req.headers["content-type"] as string | undefined;
+    const reqCodecFormat: ReturnType<typeof negotiateStreamFormat> =
+      reqContentType?.includes("application/x-codec-msgpack")
+        ? "msgpack"
+        : reqContentType?.includes("application/x-codec-protobuf")
+          ? "protobuf"
+          : undefined;
+    if (reqCodecFormat) {
       try {
-        decodeCodecRequestBody(req, codecFormat);
+        decodeCodecRequestBody(req, reqCodecFormat);
       } catch (error) {
         logger.error(
-          `Codec request decode failed (${codecFormat}):`,
+          `Codec request decode failed (${reqCodecFormat}):`,
           error,
         );
         res.status(400).json({
@@ -159,16 +169,23 @@ streamableHttpRouter.post(
           id: null,
           error: {
             code: -32700,
-            message: `Codec request body could not be decoded as ${codecFormat}`,
+            message: `Codec request body could not be decoded as ${reqCodecFormat}`,
           },
         });
         return;
       }
+    }
+
+    const respCodecFormat = negotiateStreamFormat(
+      req.query as Record<string, unknown>,
+      req.headers.accept as string | undefined,
+    );
+    if (respCodecFormat) {
       const acceptEncoding = req.headers["accept-encoding"] as
         | string
         | undefined;
       const codecEncoding = negotiateResponseEncoding(acceptEncoding);
-      wrapResponseForCodec(res, codecFormat, codecEncoding);
+      wrapResponseForCodec(res, respCodecFormat, codecEncoding);
     }
 
     // Log authentication information for debugging

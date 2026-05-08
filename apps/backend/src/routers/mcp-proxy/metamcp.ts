@@ -117,32 +117,42 @@ metamcpRouter.post("/:uuid/mcp", async (req, res) => {
     | undefined;
 
   // ── Codec negotiation ─────────────────────────────────────────────
-  // Pick the wire format from `?stream_format=…` or `Accept: application/x-codec-…`.
-  // When set, transcode the request body from msgpack/protobuf to a
-  // JS object up front and wrap `res` so the SDK's JSON-RPC writes
-  // turn into Codec frames on the wire. JSON traffic is untouched.
-  const codecFormat = negotiateStreamFormat(
-    req.query as Record<string, unknown>,
-    req.headers.accept as string | undefined,
-  );
-  if (codecFormat) {
+  // Request and response negotiation are INDEPENDENT — see the
+  // matching block in routers/public-metamcp/streamable-http.ts for
+  // the rationale. Request decode keys off Content-Type; response
+  // wrap keys off ?stream_format / Accept.
+  const reqContentType = req.headers["content-type"] as string | undefined;
+  const reqCodecFormat: ReturnType<typeof negotiateStreamFormat> =
+    reqContentType?.includes("application/x-codec-msgpack")
+      ? "msgpack"
+      : reqContentType?.includes("application/x-codec-protobuf")
+        ? "protobuf"
+        : undefined;
+  if (reqCodecFormat) {
     try {
-      decodeCodecRequestBody(req, codecFormat);
+      decodeCodecRequestBody(req, reqCodecFormat);
     } catch (error) {
-      logger.error(`Codec request decode failed (${codecFormat}):`, error);
+      logger.error(`Codec request decode failed (${reqCodecFormat}):`, error);
       res.status(400).json({
         jsonrpc: "2.0",
         id: null,
         error: {
           code: -32700,
-          message: `Codec request body could not be decoded as ${codecFormat}`,
+          message: `Codec request body could not be decoded as ${reqCodecFormat}`,
         },
       });
       return;
     }
+  }
+
+  const respCodecFormat = negotiateStreamFormat(
+    req.query as Record<string, unknown>,
+    req.headers.accept as string | undefined,
+  );
+  if (respCodecFormat) {
     const acceptEncoding = req.headers["accept-encoding"] as string | undefined;
     const codecEncoding = negotiateResponseEncoding(acceptEncoding);
-    wrapResponseForCodec(res, codecFormat, codecEncoding);
+    wrapResponseForCodec(res, respCodecFormat, codecEncoding);
   }
 
   if (!sessionId) {
