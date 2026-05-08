@@ -11,10 +11,30 @@ import { lookupEndpoint } from "@/middleware/lookup-endpoint-middleware";
 import { rateLimitMiddleware } from "@/middleware/rate-limit.middleware";
 import logger from "@/utils/logger";
 
+import { negotiateResponseEncoding } from "../../lib/metamcp/codec/codec-compression";
+import { negotiateStreamFormat } from "../../lib/metamcp/codec/codec-frame";
+import {
+  decodeCodecRequestBody,
+  wrapResponseForCodec,
+} from "../../lib/metamcp/codec/codec-transcode";
 import { metaMcpServerPool } from "../../lib/metamcp/metamcp-server-pool";
 import { SessionLifetimeManagerImpl } from "../../lib/session-lifetime-manager";
 
 const streamableHttpRouter = express.Router();
+
+// Codec opt-in raw-body parser. Only kicks in when the client posts
+// `application/x-codec-msgpack` or `…-protobuf`. JSON-RPC traffic on
+// the same routes is parsed by the SDK's existing JSON middleware
+// and is byte-for-byte unchanged.
+streamableHttpRouter.use(
+  express.raw({
+    type: [
+      "application/x-codec-msgpack",
+      "application/x-codec-protobuf",
+    ],
+    limit: "4mb",
+  }),
+);
 
 // Session lifetime manager for StreamableHTTP sessions
 const sessionManager =
@@ -116,6 +136,40 @@ streamableHttpRouter.post(
     const authReq = req as ApiKeyAuthenticatedRequest;
     const { namespaceUuid, endpointName } = authReq;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // ── Codec negotiation ───────────────────────────────────────────
+    // Pick the wire format from `?stream_format=…` or `Accept:
+    // application/x-codec-…`. When set, transcode the request body
+    // up front and wrap `res` so the SDK's JSON-RPC writes turn
+    // into Codec frames on the wire. JSON traffic is untouched.
+    const codecFormat = negotiateStreamFormat(
+      req.query as Record<string, unknown>,
+      req.headers.accept as string | undefined,
+    );
+    if (codecFormat) {
+      try {
+        decodeCodecRequestBody(req, codecFormat);
+      } catch (error) {
+        logger.error(
+          `Codec request decode failed (${codecFormat}):`,
+          error,
+        );
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32700,
+            message: `Codec request body could not be decoded as ${codecFormat}`,
+          },
+        });
+        return;
+      }
+      const acceptEncoding = req.headers["accept-encoding"] as
+        | string
+        | undefined;
+      const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+      wrapResponseForCodec(res, codecFormat, codecEncoding);
+    }
 
     // Log authentication information for debugging
     logger.info(`POST /mcp request for endpoint: ${endpointName}`);
