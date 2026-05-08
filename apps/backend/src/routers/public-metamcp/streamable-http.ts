@@ -346,8 +346,15 @@ streamableHttpRouter.post(
         // Connect the server to the transport before handling the request
         await mcpServerInstance.server.connect(transport);
 
-        // Now handle the request - server is guaranteed to be ready
-        await transport.handleRequest(req, res);
+        // Now handle the request - server is guaranteed to be ready.
+        // For Codec requests, pass req.body as the third arg so the SDK
+        // skips its own stream-read (which would error with "stream is
+        // not readable" — express.raw() consumed the stream into req.body).
+        await transport.handleRequest(
+          req,
+          res,
+          reqCodecFormat ? req.body : undefined,
+        );
       } catch (error) {
         logger.error("Error in public endpoint /mcp POST route:", error);
 
@@ -385,7 +392,13 @@ streamableHttpRouter.post(
           });
         } else {
           logger.info(`Found session ${sessionId}, handling request`);
-          await transport.handleRequest(req, res);
+          // For Codec requests, pass req.body so the SDK doesn't try to
+          // re-read the already-consumed request stream.
+          await transport.handleRequest(
+            req,
+            res,
+            reqCodecFormat ? req.body : undefined,
+          );
         }
       } catch (error) {
         logger.error("Error in public endpoint /mcp route:", error);
