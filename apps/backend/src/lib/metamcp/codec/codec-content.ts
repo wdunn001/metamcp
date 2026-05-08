@@ -80,6 +80,12 @@ interface ShimMetrics {
   /** Total `tokenizeContent` calls that produced one or more
    *  `_codec_meta` siblings. */
   tokenizeCalls: number;
+  /** Total `tokenizeContent` calls that found the leaf had ALREADY
+   *  emitted `_codec_meta` and skipped the shim path. This is the
+   *  counter operators want to grow over time — it measures how much
+   *  of MCP traffic has graduated to leaf-tokenization, the
+   *  architectural target per the spec. */
+  leafBypasses: number;
   /** Per-vocab invocation count, keyed by sha256 hash. Lets operators
    *  spot uneven legacy-MCP traffic across model families. */
   byVocab: Record<string, number>;
@@ -90,6 +96,7 @@ interface ShimMetrics {
 const shimMetrics: ShimMetrics = {
   detokenizeCalls: 0,
   tokenizeCalls: 0,
+  leafBypasses: 0,
   byVocab: {},
   since: new Date().toISOString(),
 };
@@ -130,6 +137,48 @@ function announceShimOnce(vocabHash: string, kind: "detok" | "tok"): void {
       `for vocab ${vocabHash.slice(0, 12)}… — leaf-mode MCP server would skip this. ` +
       `(spec/PROTOCOL.md § Backward compatibility)`,
   );
+}
+
+// Once-per-vocab "leaf-mode tool result observed" log line — the
+// inverse of announceShimOnce. Fires the first time a downstream MCP
+// server returns a result that already carries a `_codec_meta` block,
+// telling us this tool has graduated to leaf-tokenization. Emitted at
+// INFO because it's good news, not a degraded path; operators can
+// surface it with LOG_LEVEL=info or by polling `getShimMetrics()`.
+const leafAnnouncedFor = new Set<string>();
+function announceLeafOnce(vocabHash: string): void {
+  if (leafAnnouncedFor.has(vocabHash)) return;
+  leafAnnouncedFor.add(vocabHash);
+  logger.info(
+    `[Codec][leaf] downstream tool returned pre-tokenized result for vocab ` +
+      `${vocabHash.slice(0, 12)}… — gateway shim bypassed. ` +
+      `(spec/PROTOCOL.md § Tool-call calling conventions in the map)`,
+  );
+}
+
+/**
+ * Detect whether a CallToolResult.content array already carries a
+ * `_codec_meta` block somewhere — meaning the leaf tool tokenized
+ * its own result and the gateway should not re-tokenize.
+ *
+ * Conservative: returns true only if the meta block has the expected
+ * shape (`type === "_codec_meta"`, `map_id` is a string, `ids` is an
+ * array). A malformed sibling triggers shim re-tokenization, which is
+ * the safer fallback than passing garbage through.
+ */
+function hasExistingCodecMeta(
+  content: ReadonlyArray<{ type?: string; map_id?: unknown; ids?: unknown }>,
+): boolean {
+  for (const block of content) {
+    if (
+      block?.type === "_codec_meta" &&
+      typeof block.map_id === "string" &&
+      Array.isArray(block.ids)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Sibling block carrying the Codec encoding of a `text` content
@@ -269,6 +318,17 @@ export function tokenizeContent(
   result: CallToolResult,
   mapHash: string,
 ): CallToolResult {
+  // Idempotence: if the leaf already produced a `_codec_meta` block,
+  // the spec target is met — the gateway becomes a transparent ID
+  // pipe for this hop. Skip the shim, count the bypass, announce the
+  // first time we see it for this vocab. The result still flows as
+  // msgpack/gzip on the wire wrap layer; we just don't double-encode.
+  if (Array.isArray(result.content) && hasExistingCodecMeta(result.content)) {
+    shimMetrics.leafBypasses += 1;
+    announceLeafOnce(mapHash);
+    return result;
+  }
+
   const vocab = lookupVocabMap(mapHash);
   if (!vocab) {
     // No cached map — log + return as-is. The caller upstream
