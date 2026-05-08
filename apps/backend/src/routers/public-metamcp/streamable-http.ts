@@ -186,6 +186,13 @@ streamableHttpRouter.post(
         | undefined;
       const codecEncoding = negotiateResponseEncoding(acceptEncoding);
       wrapResponseForCodec(res, respCodecFormat, codecEncoding);
+      // The SDK's StreamableHTTPServerTransport runs its own Accept
+      // negotiation against `application/json` + `text/event-stream`
+      // and returns 406 for anything else. Spoof the header so the
+      // SDK accepts the request — the wrapResponseForCodec layer
+      // above will re-frame whatever bytes the SDK writes back into
+      // the Codec wire format on the way out.
+      req.headers.accept = "application/json, text/event-stream";
     }
 
     // Log authentication information for debugging
