@@ -110,18 +110,34 @@ export function wrapResponseForCodec(
   res.setHeader("Transfer-Encoding", "chunked");
 
   // Build the compression pipe. Output flows: writeFrame() ->
-  // [compressor] -> [res-socket]. For identity the compressor is a
-  // passthrough Transform, so the indirection is consistent.
+  // [compressor] -> originalWrite -> socket. For identity the
+  // compressor is a passthrough Transform, so the indirection is
+  // consistent.
+  //
+  // Important: we DRAIN the compressor's output by hand instead of
+  // `compressor.pipe(res)` because we're about to monkey-patch
+  // res.write to forward inbound SDK writes BACK into the
+  // compressor. piping compressor -> res would route the
+  // compressor's own output back into res.write, which our patch
+  // would forward back to the compressor — an infinite loop. By
+  // attaching a 'data' listener and calling the captured
+  // originalWrite, we go straight to the socket and skip the
+  // patched res.write entirely.
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+
   const compressor = createResponseCompressor(encoding);
   compressor.on("error", (err) => {
-    // If the compressor blows up the response is already partially
-    // written — there's no clean way to switch back to JSON. End
-    // the socket and let the client retry without stream_format.
     if (!res.destroyed) {
       res.destroy(err);
     }
   });
-  compressor.pipe(res);
+  compressor.on("data", (chunk: Buffer) => {
+    originalWrite(chunk);
+  });
+  compressor.on("end", () => {
+    originalEnd();
+  });
 
   // Patch the SDK's view of res. The SDK uses three call patterns:
   //
@@ -139,13 +155,9 @@ export function wrapResponseForCodec(
   //      error path for protocol failures (4xx/406/415/etc.). The
   //      end() chunk goes through the same forwarder so the client
   //      gets a Codec-encoded error envelope rather than mixed JSON.
-  const originalWrite = res.write.bind(res);
-  const originalEnd = res.end.bind(res);
-
-  // Unused variable suppression — we deliberately don't forward to
-  // originalWrite because that would write the original JSON bytes
-  // alongside our Codec frames.
-  void originalWrite;
+  // (originalWrite/originalEnd captured above before the compressor
+  // wiring — we use them from the compressor's data/end handlers
+  // and from the error path inside the patched end below.)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const originalWriteHead = (res as any).writeHead.bind(res);
