@@ -1,18 +1,40 @@
 /**
- * Tool-call args / results <-> Codec token IDs at the MetaMCP seam.
+ * Tool-call args / results <-> Codec token IDs — the **gateway-tokenize
+ * shim** per `spec/PROTOCOL.md § Backward compatibility (legacy
+ * text-mode tools)`.
  *
- * The MetaMCP gateway is the one place in the chain where tokens
- * have to become text and back: tokens upstream (engine + clients),
- * text in the MCP server (filesystem, GitHub, brave-search, etc.).
- * Localizing the detokenize/tokenize work here means:
+ * # Read this before changing anything in this file
  *
- *   - The inference engine emits raw uint32 tokens straight on the
- *     wire — no detokenize on the hot path.
- *   - A ToolWatcher anywhere in the chain (or the codec ecosystem's
- *     reference one in @codecai/web) runs on raw token IDs with a
- *     single uint32 compare per token instead of detokenize + regex.
- *   - The consumer (agent runtime, UI, next agent) decides when to
- *     turn tokens back into text — most chains never need to.
+ * The architectural target documented in the spec is
+ * **leaf-tokenization**: the MCP server itself tokenizes its result
+ * with the session-negotiated vocab and emits a `ToolResultFrame`
+ * with raw token IDs. The gateway in that target is a transparent ID
+ * pipe — it forwards `ToolCallFrame` / `ToolResultFrame` bytes by
+ * `tool_call_id` and never opens the body.
+ *
+ * What this file implements is **the back-compat shim** for the
+ * (currently universal) case where the downstream MCP server does
+ * NOT speak Codec. The gateway then has to do the leaf's job on its
+ * behalf:
+ *
+ *   - Inbound: detokenize a Codec-encoded `arguments` block to JSON
+ *     so the legacy MCP server sees a normal tools/call request.
+ *   - Outbound: walk a CallToolResult.content[] array and attach a
+ *     `_codec_meta` sibling carrying tokenized text, so a Codec-aware
+ *     client downstream reads IDs instead of UTF-8.
+ *
+ * That is, today's MetaMCP gateway IS the text/token boundary —
+ * because no MCP server in the wild yet emits ToolResultFrames. As
+ * MCP servers upgrade, calls to the functions in this file should
+ * disappear from any given session: the leaf tokenizes, the gateway
+ * never gets here, the spec target is met.
+ *
+ * Operator visibility: every tokenize/detokenize that happens here
+ * bumps a counter (`shimInvocationCount`). Operators can poll it via
+ * `getShimMetrics()` to see how much of their MCP traffic is still
+ * relying on the shim vs flowing as native Codec. A non-zero count is
+ * normal during the legacy → Codec transition; the goal over time is
+ * for that counter to flatline against a growing total request count.
  *
  * Two transforms live here:
  *
@@ -26,9 +48,8 @@
  *      Walk a CallToolResult.content[] array. For each
  *      {type:"text", text:"..."} block, tokenize the text and
  *      attach a sibling {type:"_codec_meta", ids, map_id} block.
- *      Empty the original text field so non-Codec MCP clients
- *      that share this namespace still see a valid (empty) text
- *      block — Codec-aware clients read the meta sibling.
+ *      Both the original text and the meta sibling ship — non-Codec
+ *      clients ignore the meta, Codec-aware clients prefer it.
  */
 import type {
   CallToolResult,
@@ -38,6 +59,70 @@ import type {
 import logger from "@/utils/logger";
 
 import { resolveVocabMap, lookupVocabMap } from "./codec-vocab";
+
+// ── Shim metrics ────────────────────────────────────────────────────
+//
+// Per spec/PROTOCOL.md § Backward compatibility, gateway-side
+// tokenization MUST be observable to operators so the cost of legacy
+// text-mode MCP servers is visible. We keep a tiny in-process counter
+// pair: total invocations, and a per-vocab breakdown for sessions
+// that have happened to mix vocabs (rare but possible if the gateway
+// fronts multiple model families).
+//
+// Cheap by design — this isn't Prometheus; it's a getter the operator
+// can poll over the trpc admin route or grep out of `docker logs`.
+// Promote to a real metrics backend if/when MetaMCP grows one.
+
+interface ShimMetrics {
+  /** Total `detokenizeCodecArgs` calls that found a `_codec_meta`
+   *  block and ran a detokenize. */
+  detokenizeCalls: number;
+  /** Total `tokenizeContent` calls that produced one or more
+   *  `_codec_meta` siblings. */
+  tokenizeCalls: number;
+  /** Per-vocab invocation count, keyed by sha256 hash. Lets operators
+   *  spot uneven legacy-MCP traffic across model families. */
+  byVocab: Record<string, number>;
+  /** When the counters were last reset (process start). */
+  since: string;
+}
+
+const shimMetrics: ShimMetrics = {
+  detokenizeCalls: 0,
+  tokenizeCalls: 0,
+  byVocab: {},
+  since: new Date().toISOString(),
+};
+
+/** Snapshot of shim invocation counters. Read-only — callers MUST NOT
+ *  mutate the returned object. */
+export function getShimMetrics(): Readonly<ShimMetrics> {
+  return {
+    ...shimMetrics,
+    byVocab: { ...shimMetrics.byVocab },
+  };
+}
+
+function bumpShim(kind: "detok" | "tok", vocabHash: string): void {
+  if (kind === "detok") shimMetrics.detokenizeCalls += 1;
+  else shimMetrics.tokenizeCalls += 1;
+  shimMetrics.byVocab[vocabHash] = (shimMetrics.byVocab[vocabHash] ?? 0) + 1;
+}
+
+// Once-per-vocab "shim mode engaged" log line. Operators see one
+// entry per fresh (vocab, process-lifetime) pair so logs aren't
+// flooded but the path is grep-able.
+const shimAnnouncedFor = new Set<string>();
+function announceShimOnce(vocabHash: string, kind: "detok" | "tok"): void {
+  const key = `${vocabHash}:${kind}`;
+  if (shimAnnouncedFor.has(key)) return;
+  shimAnnouncedFor.add(key);
+  logger.info(
+    `[Codec][shim] ${kind === "detok" ? "detokenizing args" : "tokenizing tool result"} ` +
+      `for vocab ${vocabHash.slice(0, 12)}… — leaf-mode MCP server would skip this. ` +
+      `(spec/PROTOCOL.md § Backward compatibility)`,
+  );
+}
 
 /** Sibling block carrying the Codec encoding of a `text` content
  *  block. Lives next to the original `{type:"text"}` block so
@@ -112,6 +197,12 @@ export function detokenizeCodecArgs(
         `Send X-Codec-Map: <url>;sha256=${meta.map_id} on the request to load it.`,
     );
   }
+
+  // Shim path engaged — record + announce once for operator
+  // visibility. Per spec/PROTOCOL.md § Backward compatibility, this
+  // bookkeeping is REQUIRED, not optional.
+  bumpShim("detok", meta.map_id);
+  announceShimOnce(meta.map_id, "detok");
 
   // Detokenize to UTF-8 text. The render() call is non-streaming
   // (partial=false) — args arrive whole, not chunked.
@@ -188,6 +279,7 @@ export function tokenizeContent(
     return result;
   }
 
+  let didEmitMeta = false;
   const newContent = result.content.map((block) => {
     if (block.type !== "text" || typeof block.text !== "string") {
       return block; // image, audio, resource, etc. — leave alone
@@ -202,11 +294,20 @@ export function tokenizeContent(
       map_id: mapHash,
       ids,
     };
+    didEmitMeta = true;
     // Return the original block UNCHANGED + the meta sibling.
     // The receiving Codec-aware client picks the meta over the
     // text; non-Codec clients ignore the meta and see the text.
     return [block, meta];
   });
+
+  // Only record a shim invocation if we actually emitted a `_codec_meta`
+  // sibling — a result that's all images/empty/etc. didn't trigger
+  // any leaf-shim work and shouldn't show up in the counter.
+  if (didEmitMeta) {
+    bumpShim("tok", mapHash);
+    announceShimOnce(mapHash, "tok");
+  }
 
   return {
     ...result,
