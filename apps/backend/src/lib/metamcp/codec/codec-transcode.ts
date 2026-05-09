@@ -43,6 +43,7 @@ import {
   getLoadedDictHash,
 } from "./codec-compression";
 import { tokenizeContent } from "./codec-content";
+import logger from "@/utils/logger";
 
 /**
  * Decode a Codec-framed POST body into a JSON-RPC message and replace
@@ -314,6 +315,17 @@ function tokenizeIfCallToolResult(
   if (!result || typeof result !== "object") return message;
   const content = (result as { content?: unknown }).content;
   if (!Array.isArray(content)) return message;
+  // TEMP DIAG (v0.3.x bisect — leaf-mode bypass detector): log the
+  // content-block types arriving here to verify _codec_meta survives the
+  // SDK serialize→parse round-trip. Remove once the bypass detector
+  // fires reliably and we have the variant-5 wire-bytes separation.
+  logger.warn(
+    `[Codec][diag] tokenizeIfCallToolResult content blocks: ${JSON.stringify(
+      content.map((b: unknown) =>
+        b && typeof b === "object" ? (b as { type?: unknown }).type : typeof b,
+      ),
+    )}`,
+  );
 
   // tokenizeContent's signature wants a CallToolResult; we know
   // enough about the shape (content: array) to satisfy the type.
