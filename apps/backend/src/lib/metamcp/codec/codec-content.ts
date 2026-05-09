@@ -51,10 +51,9 @@
  *      Both the original text and the meta sibling ship — non-Codec
  *      clients ignore the meta, Codec-aware clients prefer it.
  */
-import {
-  type CallToolResult,
-  type CallToolRequest,
-  CompatibilityCallToolResultSchema,
+import type {
+  CallToolResult,
+  CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
@@ -63,32 +62,43 @@ import logger from "@/utils/logger";
 import { resolveVocabMap, lookupVocabMap } from "./codec-vocab";
 
 /**
- * Codec-aware CallToolResult schema. Extends the SDK's
- * `CompatibilityCallToolResultSchema` to permit `_codec_meta` content
- * blocks alongside the standard `text|image|audio|resource` types
- * the SDK recognizes.
+ * Codec-aware CallToolResult schema. Hand-rolled permissive shape
+ * matching the MCP spec's `CallToolResult` envelope but accepting
+ * `_codec_meta` (and any other custom-type) content blocks alongside
+ * the standard `text|image|audio|resource` ones.
  *
- * Without this, the SDK's strict content-block union rejects any
- * CallToolResult whose `.content[]` includes a `_codec_meta` sibling
- * — which is exactly what a Codec-aware leaf-mode MCP server emits
- * via `@codecai/mcp-leaf`'s `wrapToolCall`. The validator runs
- * **before** `tokenizeContent()` (the leaf-bypass detector below),
- * so an invalid-content rejection short-circuits the whole result
- * with `MCP error -32602: Invalid tools/call result` and the
+ * Why hand-rolled instead of `CompatibilityCallToolResultSchema.extend(...)`:
+ * the SDK's `CompatibilityCallToolResultSchema` is a `ZodUnion` (it
+ * unions the strict v2 schema with the legacy v1 toolResult), and
+ * `ZodUnion` doesn't have `.extend()` — at runtime that throws
+ * `TypeError: CompatibilityCallToolResultSchema.extend is not a function`.
+ * So we replicate the envelope shape with `z.object(...).passthrough()`
+ * and a permissive `content` array.
+ *
+ * Why permissive: without this, the SDK's strict per-content-block
+ * validation rejects any CallToolResult whose `.content[]` includes a
+ * `_codec_meta` sibling — which is exactly what a Codec-aware leaf-mode
+ * MCP server emits via `@codecai/mcp-leaf`'s `wrapToolCall`. The
+ * validator runs *before* `tokenizeContent()` (the leaf-bypass detector
+ * below), so an invalid-content rejection short-circuits the whole
+ * result with `MCP error -32602: Invalid tools/call result` and the
  * leaf-mode bypass never gets to fire.
  *
- * The widened schema is permissive on each block's per-type field
- * shape (it only requires `type: string` + arbitrary passthrough),
- * because the downstream MCP server already validated its own
- * response, and the gateway's job is to FORWARD the result, not
- * to re-validate per-type fields. The strict per-type validation
- * happens at the client end; the gateway just needs the result to
- * be a syntactically valid CallToolResult envelope.
+ * The strict per-type validation that the SDK normally provides
+ * (text needs `text`, image needs `data`+`mimeType`, etc.) is
+ * sacrificed at the gateway. That's fine because the downstream MCP
+ * server already validated its own response shape, and the gateway's
+ * job is to forward, not to re-validate per-type fields. Strict
+ * validation happens at the client end.
  */
-export const CodecAwareCallToolResultSchema =
-  CompatibilityCallToolResultSchema.extend({
+export const CodecAwareCallToolResultSchema = z
+  .object({
+    _meta: z.optional(z.record(z.string(), z.unknown())),
     content: z.array(z.object({ type: z.string() }).passthrough()),
-  });
+    isError: z.optional(z.boolean()),
+    structuredContent: z.optional(z.unknown()),
+  })
+  .passthrough();
 
 // ── Shim metrics ────────────────────────────────────────────────────
 //
