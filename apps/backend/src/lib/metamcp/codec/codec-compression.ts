@@ -33,7 +33,7 @@ import { createGzip } from "node:zlib";
 // stays uniform with gzip's streaming Transform.
 import { compress as zstdCompress } from "@mongodb-js/zstd";
 
-import { logger } from "../../logger.js";
+import logger from "@/utils/logger";
 
 export type CodecResponseEncoding = "identity" | "gzip" | "zstd";
 
