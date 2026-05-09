@@ -3,7 +3,6 @@ import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   CallToolRequestSchema,
   CallToolResult,
-  CompatibilityCallToolResultSchema,
   GetPromptRequestSchema,
   GetPromptResultSchema,
   ListPromptsRequestSchema,
@@ -22,6 +21,12 @@ import {
 import { z } from "zod";
 
 import logger from "@/utils/logger";
+
+// Codec-aware CallToolResult schema — permits `_codec_meta` content
+// blocks alongside the standard MCP types, so the leaf-mode bypass
+// can fire without the SDK validator short-circuiting it. See
+// `codec/codec-content.ts` for the full rationale.
+import { CodecAwareCallToolResultSchema } from "./codec/codec-content";
 
 import { toolsImplementations } from "../../trpc/tools.impl";
 import { configService } from "../config.service";
@@ -437,7 +442,13 @@ export const createServer = async (
         timeout,
         maxTotalTimeout,
       };
-      // Use the correct schema for tool calls
+      // Use the Codec-aware schema for tool calls. It widens the
+      // SDK's strict CompatibilityCallToolResultSchema to permit
+      // `_codec_meta` content blocks (the leaf-mode bypass marker).
+      // The strict schema would reject any leaf-mode result with
+      // `MCP error -32602: Invalid tools/call result` BEFORE the
+      // bypass detector in tokenizeContent() runs; the widened
+      // schema lets those results through so the bypass can fire.
       const result = await clientForTool.client.request(
         {
           method: "tools/call",
@@ -447,7 +458,7 @@ export const createServer = async (
             _meta: request.params._meta,
           },
         },
-        CompatibilityCallToolResultSchema,
+        CodecAwareCallToolResultSchema,
         mcpRequestOptions,
       );
 
