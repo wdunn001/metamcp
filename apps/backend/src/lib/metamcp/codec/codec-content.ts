@@ -196,24 +196,56 @@ function announceLeafOnce(vocabHash: string): void {
   );
 }
 
+/** MCP-spec namespace key under which a Codec-aware tool stores its
+ *  pre-tokenized IDs on a TextContent block's `_meta` field. Mirror of
+ *  the same constant in @codecai/mcp-leaf — keep in sync. */
+const CODEC_META_KEY = "ai.codec/leaf-tokenization";
+
 /**
- * Detect whether a CallToolResult.content array already carries a
- * `_codec_meta` block somewhere — meaning the leaf tool tokenized
- * its own result and the gateway should not re-tokenize.
+ * Detect whether a CallToolResult.content array already carries a Codec
+ * tokenization payload — meaning the leaf tool tokenized its own result
+ * and the gateway should not re-tokenize.
  *
- * Conservative: returns true only if the meta block has the expected
- * shape (`type === "_codec_meta"`, `map_id` is a string, `ids` is an
- * array). A malformed sibling triggers shim re-tokenization, which is
- * the safer fallback than passing garbage through.
+ * Accepts both wire shapes:
+ *  - **Current (preferred)**: per-block `_meta['ai.codec/leaf-tokenization']`
+ *    on a TextContent block. Spec-compliant; passes the MCP SDK's
+ *    discriminated-union validation cleanly.
+ *  - **Legacy (v0.3.0/v0.3.1)**: sibling content block with
+ *    `{ type: '_codec_meta', map_id, ids }`. Crashes the MCP SDK's
+ *    server-side validator with -32602 on any modern SDK; only kept
+ *    for back-compat with results emitted by older Codec-aware tools.
+ *
+ * Conservative: returns true only when the payload has the expected
+ * shape (`map_id` is a string, `ids` is an array). A malformed payload
+ * triggers shim re-tokenization, which is the safer fallback than
+ * passing garbage through.
  */
 function hasExistingCodecMeta(
-  content: ReadonlyArray<{ type?: string; map_id?: unknown; ids?: unknown }>,
+  content: ReadonlyArray<unknown>,
 ): boolean {
   for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const b = block as Record<string, unknown>;
+
+    // Current shape: per-block _meta['ai.codec/leaf-tokenization']
+    const meta = b._meta;
+    if (meta && typeof meta === "object") {
+      const payload = (meta as Record<string, unknown>)[CODEC_META_KEY];
+      if (
+        payload &&
+        typeof payload === "object" &&
+        typeof (payload as Record<string, unknown>).map_id === "string" &&
+        Array.isArray((payload as Record<string, unknown>).ids)
+      ) {
+        return true;
+      }
+    }
+
+    // Legacy shape: sibling content block with type === "_codec_meta"
     if (
-      block?.type === "_codec_meta" &&
-      typeof block.map_id === "string" &&
-      Array.isArray(block.ids)
+      b.type === "_codec_meta" &&
+      typeof b.map_id === "string" &&
+      Array.isArray(b.ids)
     ) {
       return true;
     }
