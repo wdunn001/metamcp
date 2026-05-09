@@ -24,6 +24,7 @@
   "dependencies": {
     "@codecai/web": "^0.4.0",
     "@modelcontextprotocol/sdk": "1.16.0",
+    "@mongodb-js/zstd": "^2.0.0",
     "@msgpack/msgpack": "^3.0.0",
     "@repo/trpc": "workspace:*",
     "@repo/zod-types": "workspace:*",

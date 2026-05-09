@@ -264,7 +264,10 @@ streamableHttpRouter.post(
       const acceptEncoding = req.headers["accept-encoding"] as
         | string
         | undefined;
-      const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+      const codecEncoding = negotiateResponseEncoding(
+        acceptEncoding,
+        respCodecFormat,
+      );
       // Pass the vocab hash so wrapResponseForCodec runs the
       // CallToolResult content tokenizer on every response in this
       // request's lifecycle. Without a vocab, the wire still gets

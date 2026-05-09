@@ -217,7 +217,10 @@ metamcpRouter.post("/:uuid/mcp", async (req, res) => {
   );
   if (respCodecFormat) {
     const acceptEncoding = req.headers["accept-encoding"] as string | undefined;
-    const codecEncoding = negotiateResponseEncoding(acceptEncoding);
+    const codecEncoding = negotiateResponseEncoding(
+      acceptEncoding,
+      respCodecFormat,
+    );
     wrapResponseForCodec(res, respCodecFormat, codecEncoding, vocabHash);
     // SDK rejects unknown Accept values with 406 — spoof JSON+SSE so
     // it proceeds; we re-frame the bytes on the way out.

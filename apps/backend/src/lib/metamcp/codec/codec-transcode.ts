@@ -40,6 +40,7 @@ import {
 import {
   type CodecResponseEncoding,
   createResponseCompressor,
+  getLoadedDictHash,
 } from "./codec-compression";
 import { tokenizeContent } from "./codec-content";
 
@@ -113,6 +114,14 @@ export function wrapResponseForCodec(
     res.setHeader("Content-Encoding", encoding);
     res.setHeader("Vary", "Accept-Encoding");
   }
+  // Per spec/PROTOCOL.md §"Codec-Zstd-Dict response header": every
+  // zstd-encoded response MUST carry the sha256 of the dict it was
+  // compressed against, so the client can fail fast on a hash
+  // mismatch rather than mis-decompressing with the wrong dict.
+  if (encoding === "zstd") {
+    const dictHash = getLoadedDictHash(format);
+    if (dictHash) res.setHeader("Codec-Zstd-Dict", dictHash);
+  }
   // Streamable HTTP responses are unboundedly long; chunked is the
   // only sane framing. Express will set this automatically when we
   // call res.write before res.end, but pinning it here avoids any
@@ -136,7 +145,7 @@ export function wrapResponseForCodec(
   const originalWrite = res.write.bind(res);
   const originalEnd = res.end.bind(res);
 
-  const compressor = createResponseCompressor(encoding);
+  const compressor = createResponseCompressor(encoding, format);
   compressor.on("error", (err) => {
     if (!res.destroyed) {
       res.destroy(err);
@@ -188,6 +197,10 @@ export function wrapResponseForCodec(
     if (encoding !== "identity") {
       ourHeaders["Content-Encoding"] = encoding;
       ourHeaders["Vary"] = "Accept-Encoding";
+    }
+    if (encoding === "zstd") {
+      const dictHash = getLoadedDictHash(format);
+      if (dictHash) ourHeaders["Codec-Zstd-Dict"] = dictHash;
     }
     // Carry forward any non-conflicting headers the SDK passed —
     // mcp-session-id, cache-control, access-control-*, etc. The
