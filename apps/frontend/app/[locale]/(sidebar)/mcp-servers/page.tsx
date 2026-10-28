@@ -234,7 +234,10 @@ export default function McpServersPage() {
                                   : field.value ===
                                       McpServerTypeEnum.Enum.STREAMABLE_HTTP
                                     ? "Streamable HTTP"
-                                    : t("mcp-servers:selectType")}
+                                    : field.value ===
+                                        McpServerTypeEnum.Enum.OPENAPI
+                                      ? "OpenAPI"
+                                      : t("mcp-servers:selectType")}
                               <ChevronDown className="ml-2 h-4 w-4" />
                             </Button>
                           </DropdownMenuTrigger>
@@ -264,6 +267,13 @@ export default function McpServersPage() {
                               }
                             >
                               Streamable HTTP
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() =>
+                                field.onChange(McpServerTypeEnum.Enum.OPENAPI)
+                              }
+                            >
+                              OpenAPI
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -374,10 +384,11 @@ export default function McpServersPage() {
                     </>
                   )}
 
-                  {/* SSE and STREAMABLE_HTTP specific fields */}
+                  {/* SSE, STREAMABLE_HTTP and OPENAPI specific fields */}
                   {(form.watch("type") === McpServerTypeEnum.Enum.SSE ||
                     form.watch("type") ===
-                      McpServerTypeEnum.Enum.STREAMABLE_HTTP) && (
+                      McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+                    form.watch("type") === McpServerTypeEnum.Enum.OPENAPI) && (
                     <>
                       <FormField
                         control={form.control}

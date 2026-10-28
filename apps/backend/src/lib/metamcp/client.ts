@@ -9,6 +9,7 @@ import logger from "@/utils/logger";
 
 import { ProcessManagedStdioTransport } from "../stdio-transport/process-managed-transport";
 import { metamcpLogStore } from "./log-store";
+import { createOpenApiClient } from "./openapi-client";
 import { serverErrorTracker } from "./server-error-tracker";
 import { resolveEnvVariables } from "./utils";
 
@@ -35,10 +36,17 @@ export const transformDockerUrl = (url: string): string => {
   return url;
 };
 
-export const createMetaMcpClient = (
+export const createMetaMcpClient = async (
   serverParams: ServerParameters,
-): { client: Client | undefined; transport: Transport | undefined } => {
+): Promise<{ client: Client | undefined; transport: Transport | undefined }> => {
   let transport: Transport | undefined;
+
+  // OPENAPI servers are served by an in-process MCP server built from the
+  // upstream's openapi.json; the pair arrives already wired to a transport.
+  if (serverParams.type === "OPENAPI" && serverParams.url) {
+    const pair = await createOpenApiClient(serverParams);
+    return { client: pair.client, transport: pair.transport };
+  }
 
   // Create the appropriate transport based on server type
   // Default to "STDIO" if type is undefined
@@ -193,7 +201,7 @@ export const connectMetaMcpClient = async (
       }
 
       // Create fresh client and transport for each attempt
-      const result = createMetaMcpClient(serverParams);
+      const result = await createMetaMcpClient(serverParams);
       client = result.client;
       transport = result.transport;
 

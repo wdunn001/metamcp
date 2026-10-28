@@ -117,7 +117,8 @@ export function ExportImportButtons() {
         }
       } else if (
         server.type === McpServerTypeEnum.Enum.SSE ||
-        server.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP
+        server.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+        server.type === McpServerTypeEnum.Enum.OPENAPI
       ) {
         if (server.url) {
           config.url = server.url;

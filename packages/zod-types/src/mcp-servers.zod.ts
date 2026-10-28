@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const McpServerTypeEnum = z.enum(["STDIO", "SSE", "STREAMABLE_HTTP"]);
+export const McpServerTypeEnum = z.enum([
+  "STDIO",
+  "SSE",
+  "STREAMABLE_HTTP",
+  "OPENAPI",
+]);
 export const McpServerStatusEnum = z.enum(["ACTIVE", "INACTIVE"]);
 
 export const McpServerErrorStatusEnum = z.enum(["NONE", "ERROR"]);
@@ -41,10 +46,11 @@ export const createServerFormSchema = z
   )
   .refine(
     (data) => {
-      // URL is required for SSE and Streamable HTTP types
+      // URL is required for SSE, Streamable HTTP and OpenAPI types
       if (
         data.type === McpServerTypeEnum.Enum.SSE ||
-        data.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP
+        data.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+        data.type === McpServerTypeEnum.Enum.OPENAPI
       ) {
         if (!data.url || data.url.trim() === "") {
           return false;
@@ -103,10 +109,11 @@ export const EditServerFormSchema = z
   )
   .refine(
     (data) => {
-      // URL is required for SSE and Streamable HTTP types
+      // URL is required for SSE, Streamable HTTP and OpenAPI types
       if (
         data.type === McpServerTypeEnum.Enum.SSE ||
-        data.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP
+        data.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+        data.type === McpServerTypeEnum.Enum.OPENAPI
       ) {
         if (!data.url || data.url.trim() === "") {
           return false;
@@ -236,6 +243,12 @@ export const BulkImportMcpServerSchema = z
           upperVal === "HTTP"
         )
           return "STREAMABLE_HTTP";
+        if (
+          upperVal === "OPENAPI" ||
+          upperVal === "OPEN_API" ||
+          upperVal === "OAS"
+        )
+          return "OPENAPI";
         return upperVal; // Return as-is if it doesn't match known patterns
       })
       .pipe(McpServerTypeEnum.optional()),

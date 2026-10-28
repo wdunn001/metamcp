@@ -444,6 +444,7 @@ export function useConnection({
               break;
 
             case McpServerTypeEnum.Enum.SSE:
+            case McpServerTypeEnum.Enum.OPENAPI:
               mcpProxyServerUrl = new URL(`/mcp-proxy/server/sse`, getAppUrl());
               mcpProxyServerUrl.searchParams.append("url", url);
               transportOptions = {

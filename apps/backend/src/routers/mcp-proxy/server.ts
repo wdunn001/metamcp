@@ -20,6 +20,7 @@ import { mcpServersRepository } from "../../db/repositories";
 import mcpProxy from "../../lib/mcp-proxy";
 import { transformDockerUrl } from "../../lib/metamcp/client";
 import { mcpServerPool } from "../../lib/metamcp/mcp-server-pool";
+import { createOpenApiInProcessTransport } from "../../lib/metamcp/openapi-client";
 import { resolveEnvVariables } from "../../lib/metamcp/utils";
 import { ProcessManagedStdioTransport } from "../../lib/stdio-transport/process-managed-transport";
 import { betterAuthMcpMiddleware } from "../../middleware/better-auth-mcp.middleware";
@@ -357,6 +358,37 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
         headers,
       },
     });
+    await transport.start();
+    return transport;
+  } else if (transportType === McpServerTypeEnum.Enum.OPENAPI) {
+    const url = query.url as string;
+
+    // The in-process server needs the stored row for bearer token and
+    // headers; the URL alone is not enough when the upstream wants auth.
+    const servers = await mcpServersRepository.findAll();
+    const matchingServer = servers.find(
+      (server) => server.type === "OPENAPI" && server.url === url,
+    );
+    if (matchingServer) {
+      const isInError = await checkServerErrorStatus(matchingServer.uuid);
+      if (isInError) {
+        throw new Error(
+          `Server is in error state and cannot be connected to. Please check the server configuration and try again later.`,
+        );
+      }
+    }
+
+    logger.info(`OPENAPI transport: url=${url}`);
+
+    const transport = await createOpenApiInProcessTransport({
+      uuid: matchingServer?.uuid || "inspector-openapi",
+      name: matchingServer?.name || "inspector-openapi",
+      type: "OPENAPI",
+      url,
+      bearerToken: matchingServer?.bearerToken || undefined,
+      headers: matchingServer?.headers || undefined,
+      env: matchingServer?.env || undefined,
+    } as Parameters<typeof createOpenApiInProcessTransport>[0]);
     await transport.start();
     return transport;
   } else {

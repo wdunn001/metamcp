@@ -111,8 +111,12 @@ export async function getMcpServers(
           ...getDefaultEnvironment(),
           ...(params.env || {}),
         };
-      } else if (params.type === "SSE" || params.type === "STREAMABLE_HTTP") {
-        // For SSE or STREAMABLE_HTTP servers, ensure url is present
+      } else if (
+        params.type === "SSE" ||
+        params.type === "STREAMABLE_HTTP" ||
+        params.type === "OPENAPI"
+      ) {
+        // For URL-backed servers, ensure url is present
         if (!params.url) {
           logger.warn(
             `${params.type} server ${params.uuid} is missing url field, skipping`,

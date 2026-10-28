@@ -173,9 +173,10 @@ export function EditMcpServer({
           editForm.setValue("headers", "");
         } else if (
           value.type === McpServerTypeEnum.Enum.SSE ||
-          value.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP
+          value.type === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+          value.type === McpServerTypeEnum.Enum.OPENAPI
         ) {
-          // Clear command, args, and env when switching to sse or streamable_http
+          // Clear command, args, and env when switching to a URL-backed type
           editForm.setValue("command", "");
           editForm.setValue("args", "");
           editForm.setValue("env", "");
@@ -378,7 +379,10 @@ export function EditMcpServer({
                       : editForm.watch("type") ===
                           McpServerTypeEnum.Enum.STREAMABLE_HTTP
                         ? "Streamable HTTP"
-                        : t("mcp-servers:selectType")}
+                        : editForm.watch("type") ===
+                            McpServerTypeEnum.Enum.OPENAPI
+                          ? "OpenAPI"
+                          : t("mcp-servers:selectType")}
                   <ChevronDown className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -406,6 +410,13 @@ export function EditMcpServer({
                   }
                 >
                   Streamable HTTP
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() =>
+                    editForm.setValue("type", McpServerTypeEnum.Enum.OPENAPI)
+                  }
+                >
+                  OpenAPI
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -461,8 +472,8 @@ export function EditMcpServer({
           )}
 
           {(editForm.watch("type") === McpServerTypeEnum.Enum.SSE ||
-            editForm.watch("type") ===
-              McpServerTypeEnum.Enum.STREAMABLE_HTTP) && (
+            editForm.watch("type") === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+            editForm.watch("type") === McpServerTypeEnum.Enum.OPENAPI) && (
             <>
               <div className="flex flex-col gap-2">
                 <label htmlFor="edit-url" className="text-sm font-medium">

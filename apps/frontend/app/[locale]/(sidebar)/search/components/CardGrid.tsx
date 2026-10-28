@@ -295,7 +295,11 @@ function CreateServerDialog({
                             : field.value ===
                                 McpServerTypeEnum.Enum.STREAMABLE_HTTP
                               ? "Streamable HTTP"
-                              : t("search:dialog.form.placeholders.selectType")}
+                              : field.value === McpServerTypeEnum.Enum.OPENAPI
+                                ? "OpenAPI"
+                                : t(
+                                    "search:dialog.form.placeholders.selectType",
+                                  )}
                         <ChevronDown className="ml-2 h-4 w-4" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -323,6 +327,13 @@ function CreateServerDialog({
                         }
                       >
                         Streamable HTTP
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          field.onChange(McpServerTypeEnum.Enum.OPENAPI)
+                        }
+                      >
+                        OpenAPI
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -437,8 +448,8 @@ function CreateServerDialog({
             )}
 
             {(form.watch("type") === McpServerTypeEnum.Enum.SSE ||
-              form.watch("type") ===
-                McpServerTypeEnum.Enum.STREAMABLE_HTTP) && (
+              form.watch("type") === McpServerTypeEnum.Enum.STREAMABLE_HTTP ||
+              form.watch("type") === McpServerTypeEnum.Enum.OPENAPI) && (
               <>
                 <FormField
                   control={form.control}
