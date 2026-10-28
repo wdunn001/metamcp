@@ -52,7 +52,14 @@ export class McpServerPool {
     maxTotalConnections: number = 100,
   ) {
     this.defaultIdleCount = defaultIdleCount;
-    this.maxTotalConnections = maxTotalConnections;
+    // METAMCP_MAX_CONNECTIONS overrides the cap. Upstream hardcodes 100, and
+    // past it the pool refuses connections while which server loses is a
+    // race, so tools disappear at random. This override existed in the local
+    // v0.6.0 build and was lost because it was never pushed; keep it in the
+    // repo this time.
+    const fromEnv = Number(process.env.METAMCP_MAX_CONNECTIONS);
+    this.maxTotalConnections =
+      Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : maxTotalConnections;
     this.startCleanupTimer();
   }
 
